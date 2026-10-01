@@ -85,6 +85,16 @@ Minecraft's own files, and a GPU that runs Minecraft 26.3.
    its SkyCraft world by itself (a new Survival world, created on your PC), and quits when Skyrim
    closes.
 
+**Without a mod manager:** double-click `Installer SkyCraft.exe` (one file, nothing to extract;
+Windows SmartScreen asks once: **More info**, then **Run anyway**). A 4-screen assistant (in French)
+finds Skyrim (Steam), opens the Nexus pages of SKSE64 and Address Library (and Alternate Start for a
+new game) one at a time, saying exactly what to click (**Manual download**, a free Nexus account is
+needed), installs each file as soon as it lands in Downloads, installs SkyCraft, opens Prism for the
+Microsoft sign-in (and notices when it's done), and puts a **SkyCraft** shortcut on the desktop.
+That shortcut checks before each game that SKSE and Address Library still match Skyrim's version,
+and after a Steam update of Skyrim explains what to do and reopens the installer.
+The **Tuto vidéo** button's link is `$TutorialUrl` at the top of `installer\SkyCraft-Installer.ps1`.
+
 Updating: install the new SkyCraft zip over the old one. The next start updates the Minecraft side
 too and keeps your sign-in and your world.
 
@@ -173,6 +183,39 @@ Every other key is Minecraft's: **E** inventory, **F5** camera, **T** chat, **/*
 
 ## Building from source
 
+### Quick start
+
+```bat
+git clone https://github.com/Zeyrin/SkyCraft skycraft
+cd skycraft
+setup.bat
+play.bat
+```
+
+`setup.bat` does everything on a fresh Windows PC:
+
+1. Checks the build tools and installs the missing ones with winget: Git, CMake and JDK 25
+   (Temurin). Visual Studio 2026 with **Desktop development with C++** has to be installed
+   by hand ([download](https://visualstudio.microsoft.com/downloads/)); setup says so if it's missing.
+2. Fetches CommonLibSSE-NG and vcpkg into `.tools\`. The first build also builds the C++
+   libraries, which takes 10 to 30 minutes.
+3. Builds and packages SkyCraft (`dist\`), then installs it into **Mod Organizer 2** as the
+   `SkyCraft` mod and enables it in your current profile. It finds MO2 by itself or asks where
+   `ModOrganizer.exe` is, and remembers it. It warns if SKSE64 or Address Library is missing.
+
+`play.bat` then starts Skyrim through MO2 and SKSE, and SkyCraft starts Minecraft (sign in to
+Prism the first time, see [Installing](#installing)). Run `setup.bat` again to update after a
+`git pull`.
+
+| | |
+|---|---|
+| `setup.bat -Dev` | Developer setup: MO2 gets only the plugin, and Skyrim starts the dev Minecraft (`fabric\gradlew runClient`, offline name "Dovahkiin") instead of the bundled Prism. `cd skse` then `cmake --build --preset dev` rebuilds the plugin straight into MO2. |
+| `setup.bat -MO2 <folder>` | The folder with `ModOrganizer.exe`, if it isn't found |
+| `setup.bat -NoMO2` | Build only, for Vortex or a manual install: install `dist\SkyCraft-<version>.zip` |
+| `setup.bat -NoInstall` | Don't install anything with winget, only say what's missing |
+
+### By hand
+
 You need Visual Studio 2026 (C++), CMake 3.25+, Git, and JDK 25.
 
 ```bat
@@ -207,6 +250,7 @@ For development:
 | `skse/` | The Skyrim SKSE plugin (C++, [CommonLibSSE-NG](https://github.com/alandtse/CommonLibVR/tree/ng)) |
 | `fabric/` | The Minecraft Fabric mod (Java) |
 | `protocol/` | The shared-memory protocol between them |
+| `setup.bat`, `play.bat` | One-shot setup and launch (see [Quick start](#quick-start)) |
 | `tools/` | Packaging, test stand-ins (`fake_skyrim.py`, `fake_guest.py`) and diagnostics |
 
 ## License
