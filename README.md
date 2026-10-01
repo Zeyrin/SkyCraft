@@ -85,12 +85,14 @@ Minecraft's own files, and a GPU that runs Minecraft 26.3.
    its SkyCraft world by itself (a new Survival world, created on your PC), and quits when Skyrim
    closes.
 
-**Without a mod manager:** extract `SkyCraft-Installer-<version>.zip` and double-click
-`Installer SkyCraft.bat`. A 4-screen assistant (in French) finds Skyrim (Steam), opens the Nexus
-pages of SKSE64, Address Library and Alternate Start one at a time, saying exactly what to click
-(**Manual download**, a free Nexus account is needed), installs each file as soon as it lands in
-Downloads, installs SkyCraft, opens Prism for the Microsoft sign-in (and notices when it's done),
-and puts a **SkyCraft** shortcut on the desktop. Always start the game with that shortcut.
+**Without a mod manager:** double-click `Installer SkyCraft.exe` (one file, nothing to extract;
+Windows SmartScreen asks once: **More info**, then **Run anyway**). A 4-screen assistant (in French)
+finds Skyrim (Steam), opens the Nexus pages of SKSE64 and Address Library (and Alternate Start for a
+new game) one at a time, saying exactly what to click (**Manual download**, a free Nexus account is
+needed), installs each file as soon as it lands in Downloads, installs SkyCraft, opens Prism for the
+Microsoft sign-in (and notices when it's done), and puts a **SkyCraft** shortcut on the desktop.
+That shortcut checks before each game that SKSE and Address Library still match Skyrim's version,
+and after a Steam update of Skyrim explains what to do and reopens the installer.
 The **Tuto vidéo** button's link is `$TutorialUrl` at the top of `installer\SkyCraft-Installer.ps1`.
 
 Updating: install the new SkyCraft zip over the old one. The next start updates the Minecraft side

@@ -7,15 +7,21 @@
 #   3. Compte Minecraft : installe SkyCraft, prépare son Minecraft (comme le plugin le ferait au
 #      premier lancement) et ouvre Prism pour la connexion Microsoft, détectée toute seule.
 #   4. Prêt : raccourci sur le Bureau, rappel des touches, bouton Jouer.
-# SkyCraft vient du zip posé à côté (dist\SkyCraft-Installer-<version>.zip, fait par
-# tools\package.ps1), ou à défaut de la dernière release GitHub.
-param([string]$Game = "", [int]$Page = 1)
+# Distribué en un seul fichier, « Installer SkyCraft.exe » (installer\Launcher.cs, fait par
+# tools\package.ps1) : il dépose ce script et SkyCraft-<version>.zip dans %LOCALAPPDATA%\SkyCraft\installer
+# et le lance avec -Launcher <lui-même>. Le raccourci du Bureau pointe vers cet exe (--play), qui
+# vérifie avant chaque partie que SKSE et Address Library suivent la version de Skyrim.
+# Sans exe (lancé depuis le dépôt) : SkyCraft vient de la dernière release GitHub.
+param([string]$Game = "", [int]$Page = 1, [string]$Launcher = "", [int]$NewGame = -1)
 
 # ===== À régler ==================================================================================
 # Lien du tuto (vidéo, doc...). Vide : le bouton « Tuto vidéo » dit que le tuto arrive bientôt.
 $TutorialUrl = ""
 # Dépôt GitHub dont on prend la dernière release si aucun SkyCraft-<version>.zip n'est à côté.
 $GitHubRepo = "Zeyrin/SkyCraft"
+# La version de Skyrim la plus récente sur laquelle SkyCraft a été testé. Au-delà, l'installateur
+# prévient que Skyrim vient d'être mis à jour (SKSE peut ne pas suivre tout de suite).
+$LatestTested = [version]"1.7.104"
 # =================================================================================================
 
 $ErrorActionPreference = "Stop"
@@ -74,8 +80,10 @@ function Test-Admin {
 
 # Steam installe parfois Skyrim dans un dossier protégé : il faut alors les droits administrateur.
 function Restart-Elevated([string]$dir, [int]$page) {
-    Start-Process powershell -Verb RunAs -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-WindowStyle", "Hidden",
-        "-File", "`"$PSCommandPath`"", "-Game", "`"$dir`"", "-Page", $page)
+    $psArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-WindowStyle", "Hidden",
+        "-File", "`"$PSCommandPath`"", "-Game", "`"$dir`"", "-Page", $page, "-NewGame", [int]$newGameBox.Checked)
+    if ($Launcher) { $psArgs += @("-Launcher", "`"$Launcher`"") }
+    Start-Process powershell -Verb RunAs -ArgumentList $psArgs
     [Environment]::Exit(0)
 }
 
@@ -147,7 +155,8 @@ function Install-Skse([string]$archive) {
     $loader = Get-ChildItem $tmp -Recurse -Filter "skse64_loader.exe" | Select-Object -First 1
     if (-not $loader) { throw "ce fichier n'est pas SKSE64." }
     if (-not (Test-Path (Join-Path $loader.DirectoryName ([IO.Path]::GetFileName((SkseDll)))))) {
-        throw "ce SKSE n'est pas pour ton Skyrim ($($App.Version)). Prends le fichier « Anniversary Edition » le plus récent."
+        throw ("ce SKSE n'est pas pour ton Skyrim ($($App.Version)). Prends le fichier « Anniversary Edition » le plus récent. " +
+            "S'il n'existe pas encore pour cette version (Skyrim vient d'être mis à jour), réessaie dans quelques jours.")
     }
     Copy-Merge $loader.DirectoryName $App.Game @("src")
 }
@@ -156,7 +165,8 @@ function Install-AddressLib([string]$archive) {
     $tmp = Join-Path $work "addrlib"
     Expand-Any $archive $tmp
     if (-not (Get-ChildItem $tmp -Recurse -Filter ([IO.Path]::GetFileName((AddressLibBin))))) {
-        throw "ce n'est pas le bon fichier. Prends « All in one (Anniversary Edition) »."
+        throw ("ce n'est pas le bon fichier. Prends « All in one (Anniversary Edition) ». " +
+            "Si c'est déjà lui, il n'est pas encore à jour pour ton Skyrim ($($App.Version)) : réessaie dans quelques jours.")
     }
     $plugins = Join-Path $App.Game "Data\SKSE\Plugins"
     New-Item -ItemType Directory $plugins -Force | Out-Null
@@ -177,7 +187,7 @@ $mods = @(
         Installed = { (Test-Path (Join-Path $App.Game "skse64_loader.exe")) -and (Test-Path (SkseDll)) }; Install = { param($f) Install-Skse $f } },
     @{ Key = "addrlib"; Name = "Address Library"; Nexus = 32444; File = "« All in one (Anniversary Edition) »"
         Installed = { Test-Path (AddressLibBin) }; Install = { param($f) Install-AddressLib $f } },
-    @{ Key = "altstart"; Name = "Alternate Start"; Nexus = 272; File = "« Alternate Start - Live Another Life » (Main files)"; Optional = $true
+    @{ Key = "altstart"; Name = "Alternate Start"; Nexus = 272; File = "« Alternate Start - Live Another Life » (Main files)"
         Installed = { Test-Path (Join-Path $App.Game "Data\AlternateStart.esp") }; Install = { param($f) Install-AltStart $f } }
 )
 foreach ($m in $mods) { $m.State = "todo"; $m.Bad = @(); $m.Picked = $null; $m.Opened = $false; $m.Error = "" }
@@ -234,9 +244,18 @@ function Test-MinecraftAccount {
     try { return @((Get-Content $f -Raw | ConvertFrom-Json).accounts).Count -gt 0 } catch { return $false }
 }
 
+# Le raccourci passe par l'exe de l'installateur (--play) quand il y en a un : il vérifie les
+# versions avant de lancer skse64_loader.exe, et explique quoi faire après une mise à jour de Skyrim.
 function New-Shortcut {
+    New-Item -ItemType Directory $mcDir -Force | Out-Null
+    [IO.File]::WriteAllText("$mcDir\game.txt", $App.Game)
     $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "SkyCraft.lnk"))
-    $lnk.TargetPath = Join-Path $App.Game "skse64_loader.exe"
+    if ($Launcher -and (Test-Path $Launcher)) {
+        $lnk.TargetPath = $Launcher
+        $lnk.Arguments = "--play"
+    } else {
+        $lnk.TargetPath = Join-Path $App.Game "skse64_loader.exe"
+    }
     $lnk.WorkingDirectory = $App.Game
     $lnk.IconLocation = (Join-Path $App.Game "SkyrimSE.exe") + ",0"
     $lnk.Description = "Skyrim avec SkyCraft"
@@ -344,22 +363,44 @@ function Set-Footer([string]$primaryText, [scriptblock]$onPrimary, [string]$seco
 $p1 = $pages[1]
 New-Label $p1 32 22 660 32 "Salut ! On installe SkyCraft." $fontTitle | Out-Null
 New-Label $p1 32 60 660 24 "Environ 5 minutes. Tu n'as que 3 choses à faire, je t'explique chaque clic :" $fontText $gray | Out-Null
-$lines = @("Télécharger 3 petits mods sur Nexus Mods", "Te connecter à ton compte Minecraft", "Jouer !")
+$lines = @("Télécharger 2 petits mods sur Nexus Mods", "Te connecter à ton compte Minecraft", "Jouer !")
+$lineLabels = @()
 for ($i = 0; $i -lt $lines.Count; $i++) {
-    $y = 98 + 40 * $i
+    $y = 92 + 36 * $i
     $badge = New-Label $p1 34 $y 30 30 ([string]($i + 1)) $fontBold ([Drawing.Color]::White)
     $badge.BackColor = $green; $badge.TextAlign = "MiddleCenter"
-    New-Label $p1 76 ($y + 3) 600 26 $lines[$i] $fontBig | Out-Null
+    $lineLabels += New-Label $p1 76 ($y + 3) 600 26 $lines[$i] $fontBig
 }
-$needBox = New-Box $p1 32 228 656 100 $light
+
+# Alternate Start : seulement pour une nouvelle partie (l'intro de Helgen peut bloquer SkyCraft).
+# Coché d'office si le joueur n'a encore aucune sauvegarde.
+$newGameBox = New-Object Windows.Forms.CheckBox
+$newGameBox.SetBounds(34, 200, 650, 24)
+$newGameBox.Font = $fontText
+$newGameBox.Text = "Je commence une nouvelle partie (ajoute Alternate Start, pour sauter l'intro de Helgen)"
+$saves = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "My Games\Skyrim Special Edition\Saves"
+$newGameBox.Checked = if ($NewGame -ge 0) { [bool]$NewGame } else { -not (Get-ChildItem $saves -Filter "*.ess" -ErrorAction SilentlyContinue | Select-Object -First 1) }
+$newGameBox.add_CheckedChanged({ Update-ModCount })
+$p1.Controls.Add($newGameBox)
+function Update-ModCount {
+    $count = if ($newGameBox.Checked) { 3 } else { 2 }
+    $lineLabels[0].Text = "Télécharger $count petits mods sur Nexus Mods"
+    $modsTitle.Text = "Étape 1 : télécharge $count mods"
+    $alt = Get-Mod "altstart"
+    if ($alt.State -ne "done") {
+        $alt.State = if ($newGameBox.Checked) { "todo" } else { "skip" }
+        Update-Mod $alt $(if ($newGameBox.Checked) { "" } else { "Pas besoin : tu continues une partie déjà commencée." })
+    }
+}
+$needBox = New-Box $p1 32 234 656 100 $light
 New-Label $needBox 16 10 620 22 "Il te faut :" $fontBold | Out-Null
 New-Label $needBox 16 34 620 20 ([string][char]0x2022 + "  Skyrim Special Edition sur Steam, à jour, lancé au moins une fois") $fontSmall | Out-Null
 New-Label $needBox 16 54 620 20 ([string][char]0x2022 + "  Minecraft: Java Edition sur ton compte Microsoft") $fontSmall | Out-Null
 New-Label $needBox 16 74 165 20 ([string][char]0x2022 + "  un compte Nexus Mods") $fontSmall | Out-Null
 New-Link $needBox 180 73 200 "(gratuit, créer ici)" { Start-Process "https://users.nexusmods.com/register" } | Out-Null
 
-$skyIcon = New-Label $p1 32 344 30 30 "" $fontSymbol
-$skyText = New-Label $p1 64 348 520 44 "" $fontText
+$skyIcon = New-Label $p1 32 346 30 30 "" $fontSymbol
+$skyText = New-Label $p1 64 348 520 50 "" $fontSmall
 $skyLink = New-Link $p1 590 348 110 "Changer..." {
     $dialog = New-Object Windows.Forms.FolderBrowserDialog
     $dialog.Description = "Le dossier de Skyrim Special Edition (celui qui contient SkyrimSE.exe)"
@@ -376,12 +417,16 @@ function Set-Game([string]$dir) {
         $skyText.Text = "Je ne trouve pas Skyrim Special Edition. Clique « Changer... » et choisis son dossier."
     } elseif ($App.Version -lt [version]"1.6.0") {
         $skyText.Text = "Ton Skyrim ($($App.Version)) est trop ancien : mets-le à jour sur Steam."
+    } elseif ($App.Version -gt $LatestTested) {
+        $skyText.Text = ("Skyrim trouvé, mais Steam vient de le mettre à jour (version $($App.Version)). SKSE et SkyCraft " +
+            "mettent parfois quelques jours à suivre : tu peux essayer, sinon réessaie un peu plus tard.`n$dir")
+        $ok = $true
     } else {
         $skyText.Text = "Skyrim trouvé (version $($App.Version))`n$dir"
         $ok = $true
     }
-    $skyIcon.Text = if ($ok) { $check } else { $cross }
-    $skyIcon.ForeColor = if ($ok) { $green } else { $red }
+    $skyIcon.Text = if (-not $ok) { $cross } elseif ($App.Version -gt $LatestTested) { "!" } else { $check }
+    $skyIcon.ForeColor = if (-not $ok) { $red } elseif ($App.Version -gt $LatestTested) { [Drawing.Color]::DarkOrange } else { $green }
     $skyLink.Text = if ($dir) { "Changer..." } else { "Choisir..." }
     if ($App.Page -eq 1) { $primary.Enabled = $ok }
 }
@@ -389,7 +434,7 @@ function Set-Game([string]$dir) {
 # --- Écran 2 : les mods -----------------------------------------------------------------------
 
 $p2 = $pages[2]
-New-Label $p2 32 22 660 32 "Étape 1 : télécharge 3 mods" $fontTitle | Out-Null
+$modsTitle = New-Label $p2 32 22 660 32 "Étape 1 : télécharge 3 mods" $fontTitle
 New-Label $p2 32 60 660 40 ("Pour chaque mod, j'ouvre sa page Nexus dans ton navigateur (connecte-toi la première fois). " +
     "Dès que le fichier arrive dans Téléchargements, je l'installe et je passe au suivant.") $fontText $gray | Out-Null
 $howBox = New-Box $p2 32 110 656 160 ([Drawing.Color]::FromArgb(255, 248, 225))
@@ -412,14 +457,6 @@ foreach ($m in $mods) {
     $m.Icon = New-Label $p2 32 $y 30 30 $circle $fontSymbol $gray
     New-Label $p2 64 ($y + 4) 170 24 $m.Name $fontBold | Out-Null
     $m.Status = New-Label $p2 236 ($y + 5) 360 24 "" $fontSmall $gray
-    if ($m.Optional) {
-        $m.SkipLink = New-Link $p2 600 ($y + 5) 100 "Passer" {
-            $alt = Get-Mod "altstart"
-            if ($alt.State -eq "done") { return }
-            $alt.State = "skip"
-            Update-Mod $alt "Passé : commence alors depuis une sauvegarde faite après Helgen."
-        }
-    }
     $y += 36
 }
 
@@ -583,13 +620,18 @@ New-Label $p4 32 22 660 32 "C'est prêt !" $fontTitle | Out-Null
 $readyText = New-Label $p4 32 62 660 70 "" $fontText
 $tipsBox = New-Box $p4 32 140 656 240 $light
 New-Label $tipsBox 16 12 620 24 "Bon à savoir" $fontBold | Out-Null
-New-Label $tipsBox 16 40 624 190 ([string][char]0x2022 + "  Lance toujours le jeu avec le raccourci « SkyCraft » du Bureau (pas depuis Steam).`n" +
-    [string][char]0x2022 + "  Au premier lancement, Minecraft se télécharge en arrière-plan (quelques minutes) : les messages en haut à gauche de Skyrim te disent quand c'est prêt.`n" +
-    [string][char]0x2022 + "  Nouvelle partie : avec Alternate Start, prie la statue de Mara pour choisir où tu commences.`n" +
-    [string][char]0x2022 + "  Touches : G parler / ouvrir (Skyrim), E inventaire, O menu Minecraft, Échap menu Skyrim, T chat.") $fontText | Out-Null
+$tipsText = New-Label $tipsBox 16 38 624 196 "" $fontSmall
 
 function Enter-Ready {
     New-Shortcut
+    $bullet = [string][char]0x2022 + "  "
+    $start = if (Test-Path (Join-Path $App.Game "Data\AlternateStart.esp")) { "Nouvelle partie : tu te réveilles dans une cellule, prie la statue de Mara pour choisir où tu commences." }
+             else { "Charge une sauvegarde faite après Helgen (l'intro de Skyrim peut bloquer SkyCraft)." }
+    $tipsText.Text = ($bullet + "Lance toujours le jeu avec le raccourci « SkyCraft » du Bureau (pas depuis Steam).`n" +
+        $bullet + "Premier lancement : Minecraft se télécharge en arrière-plan (quelques minutes). Les messages en haut à gauche de Skyrim disent quand c'est prêt.`n" +
+        $bullet + $start + "`n" +
+        $bullet + "Touches : G parler / ouvrir (Skyrim), E inventaire, O menu Minecraft, Échap menu Skyrim.`n" +
+        $bullet + "Conseil : dans Steam, clic droit sur Skyrim > Propriétés > Mises à jour > « Ne mettre à jour ce jeu que lorsque je le lance ». Comme tu passes par le raccourci, Steam ne cassera plus SKSE avec une mise à jour surprise.")
     $readyText.Text = if (Test-MinecraftAccount) {
         "Tout est installé et ton compte Minecraft est connecté. Raccourci « SkyCraft » ajouté sur le Bureau."
     } else {
@@ -621,7 +663,8 @@ function Show-Page([int]$n) {
         4 {
             Enter-Ready
             Set-Footer "Jouer" {
-                Start-Process (Join-Path $App.Game "skse64_loader.exe") -WorkingDirectory $App.Game
+                if ($Launcher -and (Test-Path $Launcher)) { Start-Process $Launcher -ArgumentList "--play" }
+                else { Start-Process (Join-Path $App.Game "skse64_loader.exe") -WorkingDirectory $App.Game }
                 $form.Close()
             } "Fermer" { $form.Close() }
         }
@@ -650,6 +693,7 @@ $timer.add_Tick({
 try {
     if (-not $Game) { $Game = Find-Skyrim }
     Set-Game $Game
+    Update-ModCount
     Show-Page $(if ($Game -and $Page -gt 1) { $Page } else { 1 })
     $timer.Start()
     [void]$form.ShowDialog()

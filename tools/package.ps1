@@ -1,8 +1,8 @@
 # Builds both halves of SkyCraft and packs a release into dist\:
 #   SkyCraft-<version>.zip             the Skyrim mod (install with MO2 or Vortex): the SKSE plugin, its
 #                                      ini, and SkyCraft-Minecraft.zip, the Minecraft it starts
-#   SkyCraft-Installer-<version>.zip   for friends: a graphical installer (SKSE, Address Library,
-#                                      Alternate Start from Nexus, then SkyCraft) and the mod zip
+#   Installer SkyCraft.exe             for friends: one file with a graphical installer (SKSE,
+#                                      Address Library, Alternate Start from Nexus, then SkyCraft)
 #   SkyCraft-<version>-pdb.zip         the plugin's debug symbols, for reading crash logs
 #   skycraft-fabric-<version>.jar      the Minecraft mod on its own (for your own launcher)
 #
@@ -113,12 +113,13 @@ New-Zip "$dist\SkyCraft-$version.zip" ([ordered]@{
     "SKSE/Plugins/SkyCraft/LICENSE.txt" = "$root\LICENSE"
     "SKSE/Plugins/SkyCraft/THIRD-PARTY-NOTICES.md" = "$root\THIRD-PARTY-NOTICES.md"
 })
-# For friends: the graphical installer next to the mod zip it installs (extract, double-click the .bat).
-New-Zip "$dist\SkyCraft-Installer-$version.zip" ([ordered]@{
-    "Installer SkyCraft.bat" = "$root\installer\Installer SkyCraft.bat"
-    "SkyCraft-Installer.ps1" = "$root\installer\SkyCraft-Installer.ps1"
-    "SkyCraft-$version.zip" = "$dist\SkyCraft-$version.zip"
-})
+# For friends: one .exe holding the graphical installer and the mod zip (installer\Launcher.cs), built
+# with the .NET Framework 4 compiler every Windows has.
+$csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+& $csc /nologo /target:winexe /optimize /codepage:65001 /out:"$dist\Installer SkyCraft.exe" /reference:System.Windows.Forms.dll `
+    "/resource:$root\installer\SkyCraft-Installer.ps1,SkyCraft-Installer.ps1" "/resource:$dist\SkyCraft-$version.zip,SkyCraft-$version.zip" `
+    "$root\installer\Launcher.cs"
+if ($LASTEXITCODE) { throw "the installer .exe didn't build" }
 New-Zip "$dist\SkyCraft-$version-pdb.zip" ([ordered]@{ "SkyCraft.pdb" = $pdb })
 Copy-Item $jar "$dist\skycraft-fabric-$version.jar"
 Remove-Item "$dist\SkyCraft-Minecraft.zip"
