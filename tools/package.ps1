@@ -1,6 +1,8 @@
 # Builds both halves of SkyCraft and packs a release into dist\:
 #   SkyCraft-<version>.zip             the Skyrim mod (install with MO2 or Vortex): the SKSE plugin, its
 #                                      ini, and SkyCraft-Minecraft.zip, the Minecraft it starts
+#   SkyCraft-Installer-<version>.zip   for friends: a graphical installer (SKSE, Address Library,
+#                                      Alternate Start from Nexus, then SkyCraft) and the mod zip
 #   SkyCraft-<version>-pdb.zip         the plugin's debug symbols, for reading crash logs
 #   skycraft-fabric-<version>.jar      the Minecraft mod on its own (for your own launcher)
 #
@@ -110,6 +112,12 @@ New-Zip "$dist\SkyCraft-$version.zip" ([ordered]@{
     "SKSE/Plugins/SkyCraft/SkyCraft-Minecraft.zip" = "$dist\SkyCraft-Minecraft.zip"
     "SKSE/Plugins/SkyCraft/LICENSE.txt" = "$root\LICENSE"
     "SKSE/Plugins/SkyCraft/THIRD-PARTY-NOTICES.md" = "$root\THIRD-PARTY-NOTICES.md"
+})
+# For friends: the graphical installer next to the mod zip it installs (extract, double-click the .bat).
+New-Zip "$dist\SkyCraft-Installer-$version.zip" ([ordered]@{
+    "Installer SkyCraft.bat" = "$root\installer\Installer SkyCraft.bat"
+    "SkyCraft-Installer.ps1" = "$root\installer\SkyCraft-Installer.ps1"
+    "SkyCraft-$version.zip" = "$dist\SkyCraft-$version.zip"
 })
 New-Zip "$dist\SkyCraft-$version-pdb.zip" ([ordered]@{ "SkyCraft.pdb" = $pdb })
 Copy-Item $jar "$dist\skycraft-fabric-$version.jar"
