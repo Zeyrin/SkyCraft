@@ -1,12 +1,18 @@
-﻿# Installateur SkyCraft pour joueurs : une fenêtre qui installe tout dans le Skyrim de Steam (sans
-# gestionnaire de mods). SKSE64, Address Library et Alternate Start viennent de Nexus Mods : la page
-# s'ouvre, le joueur clique « Manual download », et l'installateur prend le fichier dans
-# Téléchargements tout seul. SkyCraft vient du zip posé à côté (dist\SkyCraft-Installer-<version>.zip,
-# fait par tools\package.ps1), ou à défaut de la dernière release GitHub.
-param([string]$Game = "")
+﻿# Installateur SkyCraft pour joueurs : un assistant en 4 écrans qui installe tout dans le Skyrim de
+# Steam (sans gestionnaire de mods) et explique chaque clic.
+#   1. Bienvenue : trouve Skyrim, dit ce qu'il faut.
+#   2. Les mods : SKSE64, Address Library et Alternate Start viennent de Nexus Mods. La page s'ouvre,
+#      le joueur clique « Manual download », l'installateur prend le fichier dans Téléchargements et
+#      passe tout seul au suivant.
+#   3. Compte Minecraft : installe SkyCraft, prépare son Minecraft (comme le plugin le ferait au
+#      premier lancement) et ouvre Prism pour la connexion Microsoft, détectée toute seule.
+#   4. Prêt : raccourci sur le Bureau, rappel des touches, bouton Jouer.
+# SkyCraft vient du zip posé à côté (dist\SkyCraft-Installer-<version>.zip, fait par
+# tools\package.ps1), ou à défaut de la dernière release GitHub.
+param([string]$Game = "", [int]$Page = 1)
 
 # ===== À régler ==================================================================================
-# Lien du tuto (vidéo, doc...). Vide : le bouton « Tutoriel » dit que le tuto arrive bientôt.
+# Lien du tuto (vidéo, doc...). Vide : le bouton « Tuto vidéo » dit que le tuto arrive bientôt.
 $TutorialUrl = ""
 # Dépôt GitHub dont on prend la dernière release si aucun SkyCraft-<version>.zip n'est à côté.
 $GitHubRepo = "Zeyrin/SkyCraft"
@@ -18,7 +24,10 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.IO.Compressi
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $here = $PSScriptRoot
 $work = Join-Path $env:TEMP "SkyCraft-Installer"
+$mcDir = Join-Path $env:LOCALAPPDATA "SkyCraft"
 New-Item -ItemType Directory $work -Force | Out-Null
+
+$App = @{ Game = $null; Version = $null; Page = 0; Busy = $false; Mod = $null; Mc = "install"; Download = $null; Unpack = $null; Prism = $null }
 
 function Show-Error([string]$text) {
     [Windows.Forms.MessageBox]::Show($text, "SkyCraft", "OK", "Error") | Out-Null
@@ -63,12 +72,16 @@ function Test-Admin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# Steam installe souvent Skyrim dans Program Files : il faut alors les droits administrateur.
-function Restart-Elevated([string]$dir) {
+# Steam installe parfois Skyrim dans un dossier protégé : il faut alors les droits administrateur.
+function Restart-Elevated([string]$dir, [int]$page) {
     Start-Process powershell -Verb RunAs -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-WindowStyle", "Hidden",
-        "-File", "`"$PSCommandPath`"", "-Game", "`"$dir`"")
+        "-File", "`"$PSCommandPath`"", "-Game", "`"$dir`"", "-Page", $page)
     [Environment]::Exit(0)
 }
+
+function VersionTag([string]$sep) { "{1}{0}{2}{0}{3}" -f $sep, $App.Version.Major, $App.Version.Minor, $App.Version.Build }
+function SkseDll { Join-Path $App.Game ("skse64_{0}.dll" -f (VersionTag "_")) }
+function AddressLibBin { Join-Path $App.Game ("Data\SKSE\Plugins\versionlib-{0}-0.bin" -f (VersionTag "-")) }
 
 # --- Fichiers ---------------------------------------------------------------------------------
 
@@ -83,8 +96,7 @@ function Get-DownloadsDir {
 # Le dernier fichier de ce mod Nexus dans Téléchargements. Les noms Nexus contiennent l'id du mod
 # (« Nom-30379-2-3-1-1755000000.7z »). Firefox crée le fichier vide et écrit dans un .part à côté.
 function Find-NexusDownload([int]$id, [string[]]$bad) {
-    $dir = Get-DownloadsDir
-    Get-ChildItem $dir -File -ErrorAction SilentlyContinue |
+    Get-ChildItem (Get-DownloadsDir) -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match "-$id-" -and $_.Extension -match '^\.(7z|zip)$' -and $_.Length -gt 0 -and
             -not (Test-Path "$($_.FullName).part") -and $bad -notcontains $_.FullName } |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -127,35 +139,15 @@ function Enable-Plugin([string]$name) {
     Set-Content $file ($lines + "*$name") -Encoding ASCII
 }
 
-# --- Étapes -----------------------------------------------------------------------------------
-
-$App = @{ Game = $null; Version = $null; Running = $false; Busy = $false }
-
-function VersionTag([string]$sep) { "{1}{0}{2}{0}{3}" -f $sep, $App.Version.Major, $App.Version.Minor, $App.Version.Build }
-function SkseDll { Join-Path $App.Game ("skse64_{0}.dll" -f (VersionTag "_")) }
-function AddressLibBin { Join-Path $App.Game ("Data\SKSE\Plugins\versionlib-{0}-0.bin" -f (VersionTag "-")) }
-
-$steps = @(
-    @{ Key = "skyrim"; Title = "Skyrim Special Edition"; Button = "Changer..." },
-    @{ Key = "skse"; Title = "SKSE64 (Skyrim Script Extender)"; Button = "Choisir le fichier..."; Nexus = 30379
-        Hint = "Sur la page : section « Main files », le build « Anniversary Edition » > Manual download." },
-    @{ Key = "addrlib"; Title = "Address Library for SKSE Plugins"; Button = "Choisir le fichier..."; Nexus = 32444
-        Hint = "Sur la page : « All in one (Anniversary Edition) » > Manual download." },
-    @{ Key = "altstart"; Title = "Alternate Start (recommandé)"; Button = "Choisir le fichier..."; Skip = "Passer"; Nexus = 272
-        Hint = "Sur la page : le fichier principal (Main files) > Manual download. Évite l'intro de Helgen, qui peut bloquer SkyCraft." },
-    @{ Key = "skycraft"; Title = "SkyCraft" },
-    @{ Key = "shortcut"; Title = "Raccourci « SkyCraft » sur le Bureau" }
-)
-foreach ($s in $steps) { $s.State = "todo"; $s.Bad = @(); $s.Picked = $null; $s.Opened = $false }
-function Step([string]$key) { $steps | Where-Object { $_.Key -eq $key } | Select-Object -First 1 }
+# --- Les 3 mods Nexus ---------------------------------------------------------------------------
 
 function Install-Skse([string]$archive) {
     $tmp = Join-Path $work "skse"
     Expand-Any $archive $tmp
     $loader = Get-ChildItem $tmp -Recurse -Filter "skse64_loader.exe" | Select-Object -First 1
-    if (-not $loader) { throw "Ce fichier n'est pas SKSE64 (pas de skse64_loader.exe dedans)." }
+    if (-not $loader) { throw "ce fichier n'est pas SKSE64." }
     if (-not (Test-Path (Join-Path $loader.DirectoryName ([IO.Path]::GetFileName((SkseDll)))))) {
-        throw "Ce SKSE n'est pas pour Skyrim $($App.Version). Prends le build « Anniversary Edition » le plus récent."
+        throw "ce SKSE n'est pas pour ton Skyrim ($($App.Version)). Prends le fichier « Anniversary Edition » le plus récent."
     }
     Copy-Merge $loader.DirectoryName $App.Game @("src")
 }
@@ -163,9 +155,8 @@ function Install-Skse([string]$archive) {
 function Install-AddressLib([string]$archive) {
     $tmp = Join-Path $work "addrlib"
     Expand-Any $archive $tmp
-    $want = [IO.Path]::GetFileName((AddressLibBin))
-    if (-not (Get-ChildItem $tmp -Recurse -Filter $want)) {
-        throw "Ce n'est pas le bon fichier pour Skyrim $($App.Version) : prends « All in one (Anniversary Edition) »."
+    if (-not (Get-ChildItem $tmp -Recurse -Filter ([IO.Path]::GetFileName((AddressLibBin))))) {
+        throw "ce n'est pas le bon fichier. Prends « All in one (Anniversary Edition) »."
     }
     $plugins = Join-Path $App.Game "Data\SKSE\Plugins"
     New-Item -ItemType Directory $plugins -Force | Out-Null
@@ -176,9 +167,28 @@ function Install-AltStart([string]$archive) {
     $tmp = Join-Path $work "altstart"
     Expand-Any $archive $tmp
     $esp = Get-ChildItem $tmp -Recurse -Filter "AlternateStart.esp" | Select-Object -First 1
-    if (-not $esp) { throw "Ce fichier n'est pas Alternate Start (pas d'AlternateStart.esp dedans)." }
+    if (-not $esp) { throw "ce fichier n'est pas Alternate Start." }
     Copy-Merge $esp.DirectoryName (Join-Path $App.Game "Data") @("fomod")
     Enable-Plugin "AlternateStart.esp"
+}
+
+$mods = @(
+    @{ Key = "skse"; Name = "SKSE64"; Nexus = 30379; File = "le fichier « Anniversary Edition » le plus récent (Main files)"
+        Installed = { (Test-Path (Join-Path $App.Game "skse64_loader.exe")) -and (Test-Path (SkseDll)) }; Install = { param($f) Install-Skse $f } },
+    @{ Key = "addrlib"; Name = "Address Library"; Nexus = 32444; File = "« All in one (Anniversary Edition) »"
+        Installed = { Test-Path (AddressLibBin) }; Install = { param($f) Install-AddressLib $f } },
+    @{ Key = "altstart"; Name = "Alternate Start"; Nexus = 272; File = "« Alternate Start - Live Another Life » (Main files)"; Optional = $true
+        Installed = { Test-Path (Join-Path $App.Game "Data\AlternateStart.esp") }; Install = { param($f) Install-AltStart $f } }
+)
+foreach ($m in $mods) { $m.State = "todo"; $m.Bad = @(); $m.Picked = $null; $m.Opened = $false; $m.Error = "" }
+function Get-Mod([string]$key) { $mods | Where-Object { $_.Key -eq $key } | Select-Object -First 1 }
+function Open-NexusPage($m) { Start-Process "https://www.nexusmods.com/skyrimspecialedition/mods/$($m.Nexus)?tab=files"; $m.Opened = $true }
+
+# --- SkyCraft et son Minecraft ------------------------------------------------------------------
+
+function Find-LocalSkyCraftZip {
+    Get-ChildItem $here -Filter "SkyCraft-*.zip" -File | Where-Object { $_.Name -match '^SkyCraft-[\d.]+\.zip$' } |
+        Sort-Object Name -Descending | Select-Object -First 1
 }
 
 function Install-SkyCraft([string]$zip) {
@@ -195,289 +205,453 @@ function Install-SkyCraft([string]$zip) {
     } finally { $archive.Dispose() }
 }
 
-function Find-LocalSkyCraftZip {
-    Get-ChildItem $here -Filter "SkyCraft-*.zip" -File | Where-Object { $_.Name -match '^SkyCraft-[\d.]+\.zip$' } |
-        Sort-Object Name -Descending | Select-Object -First 1
+# Dépaquette le Minecraft de SkyCraft dans %LOCALAPPDATA%\SkyCraft exactement comme le plugin
+# (Launcher.cpp, EnsureBundle) : même dossier, même bundle.stamp (taille + date du zip en FILETIME),
+# donc le plugin ne le refait pas. S'ils différaient, il le referait en gardant le compte connecté.
+function Get-BundleStamp {
+    $bundle = Join-Path $App.Game "Data\SKSE\Plugins\SkyCraft\SkyCraft-Minecraft.zip"
+    "{0} {1}" -f (Get-Item $bundle).Length, [IO.File]::GetLastWriteTimeUtc($bundle).ToFileTimeUtc()
+}
+function Start-Unpack {
+    $stampFile = Join-Path $mcDir "bundle.stamp"
+    if ((Test-Path $stampFile) -and (Test-Path "$mcDir\Prism\prismlauncher.exe") -and (Get-Content $stampFile -Raw).Trim() -eq (Get-BundleStamp)) { return $null }
+    New-Item -ItemType Directory $mcDir -Force | Out-Null
+    Get-ChildItem "$mcDir\Prism\instances\SkyCraft\.minecraft\mods" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^(skycraft-|fabric-api-|e4mc-)' } | Remove-Item -Force
+    Copy-Item (Join-Path $App.Game "Data\SKSE\Plugins\SkyCraft\SkyCraft-Minecraft.zip") "$mcDir\bundle.zip" -Force
+    return Start-Process "$env:SystemRoot\System32\tar.exe" -ArgumentList @("-xf", "`"$mcDir\bundle.zip`"", "-C", "`"$mcDir`"") -PassThru -WindowStyle Hidden
+}
+function Complete-Unpack {
+    Remove-Item "$mcDir\bundle.zip" -ErrorAction SilentlyContinue
+    if (-not (Test-Path "$mcDir\Prism\prismlauncher.exe")) { throw "le Minecraft de SkyCraft n'a pas pu être dépaqueté." }
+    if (-not (Test-Path "$mcDir\Prism\prismlauncher.cfg")) { Copy-Item "$mcDir\defaults\prismlauncher.cfg" "$mcDir\Prism\prismlauncher.cfg" }
+    [IO.File]::WriteAllText("$mcDir\bundle.stamp", (Get-BundleStamp))
 }
 
-# Une étape Nexus : déjà installée, ou fichier choisi, ou fichier trouvé dans Téléchargements, ou
-# on ouvre la page et on attend.
-function Invoke-NexusStep($s, [scriptblock]$installed, [scriptblock]$install) {
-    if (& $installed) { Set-Detail $s "Déjà installé."; return "done" }
-    if ($s.Skipped) { return "skip" }
-    $file = $s.Picked
-    if (-not $file) { $found = Find-NexusDownload $s.Nexus $s.Bad; if ($found) { $file = $found.FullName } }
-    if (-not $file) {
-        if (-not $s.Opened) {
-            Start-Process "https://www.nexusmods.com/skyrimspecialedition/mods/$($s.Nexus)?tab=files"
-            $s.Opened = $true
-        }
-        Set-Detail $s ("Page Nexus ouverte (compte gratuit nécessaire). " + $s.Hint + " J'attends le fichier dans Téléchargements...")
-        return "wait"
-    }
-    Set-Detail $s "Installation de $([IO.Path]::GetFileName($file))..."
-    try {
-        & $install $file
-    } catch {
-        $s.Bad += $file
-        $s.Picked = $null
-        Set-Detail $s ("Mauvais fichier : " + $_.Exception.Message)
-        return "wait"
-    }
-    Set-Detail $s "Installé."
-    return "done"
+function Test-MinecraftAccount {
+    $f = "$mcDir\Prism\accounts.json"
+    if (-not (Test-Path $f)) { return $false }
+    try { return @((Get-Content $f -Raw | ConvertFrom-Json).accounts).Count -gt 0 } catch { return $false }
 }
 
-function Invoke-Step($s) {
-    switch ($s.Key) {
-        "skyrim" {
-            if (-not $App.Game) { Set-Detail $s "Skyrim introuvable : clique « Changer... » et choisis son dossier (celui avec SkyrimSE.exe)."; return "fail" }
-            if ($App.Version -lt [version]"1.6.0") {
-                Set-Detail $s "Skyrim $($App.Version) n'est pas supporté : il faut la version à jour de Steam (1.6 ou plus)."
-                return "fail"
-            }
-            if (-not (Test-Writable $App.Game)) {
-                if (Test-Admin) { Set-Detail $s "Impossible d'écrire dans $($App.Game)."; return "fail" }
-                $answer = [Windows.Forms.MessageBox]::Show("Skyrim est dans un dossier protégé. L'installateur doit redémarrer en administrateur.", "SkyCraft", "OKCancel", "Information")
-                if ($answer -eq "OK") { Restart-Elevated $App.Game }
-                Set-Detail $s "Droits administrateur nécessaires pour écrire dans $($App.Game)."
-                return "fail"
-            }
-            Set-Detail $s "$($App.Game)  (version $($App.Version))"
-            return "done"
-        }
-        "skse" { return Invoke-NexusStep $s { (Test-Path (Join-Path $App.Game "skse64_loader.exe")) -and (Test-Path (SkseDll)) } { param($f) Install-Skse $f } }
-        "addrlib" { return Invoke-NexusStep $s { Test-Path (AddressLibBin) } { param($f) Install-AddressLib $f } }
-        "altstart" { return Invoke-NexusStep $s { Test-Path (Join-Path $App.Game "Data\AlternateStart.esp") } { param($f) Install-AltStart $f } }
-        "skycraft" {
-            if ($s.Download) {
-                # Téléchargement GitHub en cours (asynchrone, pour ne pas figer la fenêtre).
-                $task = $s.Download.Task
-                if (-not $task.IsCompleted) {
-                    if (Test-Path $s.Download.Path) { $progress.Value = [Math]::Min(100, [int](100 * (Get-Item $s.Download.Path).Length / $s.Download.Size)) }
-                    return "wait"
-                }
-                $progress.Value = 0
-                $path = $s.Download.Path
-                $s.Download = $null
-                if ($task.IsFaulted) { Set-Detail $s "Le téléchargement a échoué : $($task.Exception.InnerException.Message)"; return "fail" }
-                $zip = $path
-            } else {
-                $local = Find-LocalSkyCraftZip
-                if ($local) {
-                    $zip = $local.FullName
-                } else {
-                    try {
-                        $release = Invoke-RestMethod "https://api.github.com/repos/$GitHubRepo/releases/latest" -UseBasicParsing
-                    } catch {
-                        Set-Detail $s "Pas de SkyCraft-<version>.zip à côté de l'installateur, et la release GitHub est inaccessible. As-tu bien extrait tout le zip ?"
-                        return "fail"
-                    }
-                    $asset = $release.assets | Where-Object { $_.name -match '^SkyCraft-[\d.]+\.zip$' } | Select-Object -First 1
-                    if (-not $asset) { Set-Detail $s "La dernière release GitHub n'a pas de SkyCraft-<version>.zip."; return "fail" }
-                    $path = Join-Path $work $asset.name
-                    Remove-Item $path -ErrorAction SilentlyContinue
-                    $client = New-Object Net.WebClient
-                    $s.Download = @{ Task = $client.DownloadFileTaskAsync($asset.browser_download_url, $path); Path = $path; Size = [double]$asset.size }
-                    Set-Detail $s "Téléchargement de $($asset.name)..."
-                    return "wait"
-                }
-            }
-            Set-Detail $s "Installation de $([IO.Path]::GetFileName($zip))..."
-            Install-SkyCraft $zip
-            Set-Detail $s "Installé ($([IO.Path]::GetFileNameWithoutExtension($zip)))."
-            return "done"
-        }
-        "shortcut" {
-            $lnkPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "SkyCraft.lnk"
-            $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)
-            $lnk.TargetPath = Join-Path $App.Game "skse64_loader.exe"
-            $lnk.WorkingDirectory = $App.Game
-            $lnk.IconLocation = (Join-Path $App.Game "SkyrimSE.exe") + ",0"
-            $lnk.Description = "Skyrim avec SkyCraft (via SKSE)"
-            $lnk.Save()
-            Set-Detail $s "Créé : lance toujours le jeu avec ce raccourci (pas depuis Steam)."
-            return "done"
-        }
-    }
+function New-Shortcut {
+    $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "SkyCraft.lnk"))
+    $lnk.TargetPath = Join-Path $App.Game "skse64_loader.exe"
+    $lnk.WorkingDirectory = $App.Game
+    $lnk.IconLocation = (Join-Path $App.Game "SkyrimSE.exe") + ",0"
+    $lnk.Description = "Skyrim avec SkyCraft"
+    $lnk.Save()
 }
 
 # --- Fenêtre ----------------------------------------------------------------------------------
 
-$font = New-Object Drawing.Font("Segoe UI", 9)
+$green = [Drawing.Color]::FromArgb(60, 133, 39)
+$dark = [Drawing.Color]::FromArgb(31, 35, 41)
+$gray = [Drawing.Color]::FromArgb(100, 106, 115)
+$light = [Drawing.Color]::FromArgb(243, 244, 246)
+$red = [Drawing.Color]::Firebrick
+$fontText = New-Object Drawing.Font("Segoe UI", 10)
+$fontSmall = New-Object Drawing.Font("Segoe UI", 9)
+$fontBold = New-Object Drawing.Font("Segoe UI", 10, [Drawing.FontStyle]::Bold)
+$fontTitle = New-Object Drawing.Font("Segoe UI", 15, [Drawing.FontStyle]::Bold)
+$fontBig = New-Object Drawing.Font("Segoe UI", 12)
+$fontSymbol = New-Object Drawing.Font("Segoe UI Symbol", 13)
+$check = [string][char]0x2714; $cross = [string][char]0x2716; $dot = [string][char]0x25CF; $circle = [string][char]0x25CB
+
 $form = New-Object Windows.Forms.Form
-$form.Text = "SkyCraft - Installation"
-$form.ClientSize = New-Object Drawing.Size(760, 600)
+$form.Text = "Installer SkyCraft"
+$form.ClientSize = New-Object Drawing.Size(720, 560)
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
 $form.StartPosition = "CenterScreen"
-$form.Font = $font
 $form.BackColor = [Drawing.Color]::White
+$form.Font = $fontText
 
-function Add-Label([int]$x, [int]$y, [int]$w, [int]$h, [string]$text, $f = $font, $color = [Drawing.Color]::Black) {
+function New-Label($parent, [int]$x, [int]$y, [int]$w, [int]$h, [string]$text, $font = $fontText, $color = $dark) {
     $l = New-Object Windows.Forms.Label
     $l.SetBounds($x, $y, $w, $h)
     $l.Text = $text
-    $l.Font = $f
+    $l.Font = $font
     $l.ForeColor = $color
-    $form.Controls.Add($l)
+    $l.BackColor = [Drawing.Color]::Transparent
+    $parent.Controls.Add($l)
     return $l
 }
-function Add-Button([int]$x, [int]$y, [int]$w, [int]$h, [string]$text) {
+function New-Link($parent, [int]$x, [int]$y, [int]$w, [string]$text, [scriptblock]$onClick) {
+    $l = New-Object Windows.Forms.LinkLabel
+    $l.SetBounds($x, $y, $w, 22)
+    $l.Text = $text
+    $l.Font = $fontSmall
+    $l.LinkColor = $green
+    $l.BackColor = [Drawing.Color]::Transparent
+    $l.add_LinkClicked($onClick)
+    $parent.Controls.Add($l)
+    return $l
+}
+function New-Button($parent, [int]$x, [int]$y, [int]$w, [int]$h, [string]$text, [bool]$primary) {
     $b = New-Object Windows.Forms.Button
     $b.SetBounds($x, $y, $w, $h)
     $b.Text = $text
-    $form.Controls.Add($b)
+    $b.FlatStyle = "Flat"
+    $b.Cursor = [Windows.Forms.Cursors]::Hand
+    if ($primary) {
+        $b.BackColor = $green; $b.ForeColor = [Drawing.Color]::White; $b.Font = $fontBold
+        $b.FlatAppearance.BorderSize = 0
+    } else {
+        $b.BackColor = [Drawing.Color]::White; $b.ForeColor = $dark; $b.Font = $fontText
+        $b.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(200, 204, 210)
+    }
+    $parent.Controls.Add($b)
     return $b
 }
-
-Add-Label 20 14 720 32 "SkyCraft - Installation" (New-Object Drawing.Font("Segoe UI", 16, [Drawing.FontStyle]::Bold)) | Out-Null
-Add-Label 20 50 720 40 ("Il te faut Skyrim Special Edition sur Steam (à jour) et Minecraft: Java Edition sur ton compte Microsoft. " +
-    "Un compte Nexus Mods gratuit sert à télécharger 3 petits mods : l'installateur ouvre les pages, tu cliques, il fait le reste.") $font ([Drawing.Color]::DimGray) | Out-Null
-
-$gray = [Drawing.Color]::DimGray
-$symbolFont = New-Object Drawing.Font("Segoe UI Symbol", 14)
-$boldFont = New-Object Drawing.Font("Segoe UI", 10, [Drawing.FontStyle]::Bold)
-$y = 100
-foreach ($s in $steps) {
-    $s.Icon = Add-Label 20 ($y + 2) 32 30 ([string][char]0x25CB) $symbolFont $gray
-    Add-Label 60 $y 410 20 $s.Title $boldFont | Out-Null
-    $s.Detail = Add-Label 60 ($y + 21) 420 40 "" $font $gray
-    if ($s.Button) { $s.ButtonControl = Add-Button 490 ($y + 4) 125 28 $s.Button }
-    if ($s.Skip) { $s.SkipControl = Add-Button 620 ($y + 4) 120 28 $s.Skip }
-    $y += 64
+function New-Box($parent, [int]$x, [int]$y, [int]$w, [int]$h, $color) {
+    $p = New-Object Windows.Forms.Panel
+    $p.SetBounds($x, $y, $w, $h)
+    $p.BackColor = $color
+    $parent.Controls.Add($p)
+    return $p
 }
 
-$progress = New-Object Windows.Forms.ProgressBar
-$progress.SetBounds(20, 492, 720, 14)
-$form.Controls.Add($progress)
-$status = Add-Label 20 512 720 22 "Clique « Installer » pour commencer." $font
-
-$tutorialButton = Add-Button 20 545 170 40 "Tutoriel"
-$installButton = Add-Button 390 545 170 40 "Installer"
-$playButton = Add-Button 570 545 170 40 "Jouer"
-$installButton.Font = $boldFont
-$playButton.Font = $boldFont
-$playButton.Enabled = $false
-
-function Set-Detail($s, [string]$text) { $s.Detail.Text = $text; [Windows.Forms.Application]::DoEvents() }
-function Set-State($s, [string]$state) {
-    $s.State = $state
-    switch ($state) {
-        "todo" { $s.Icon.Text = [string][char]0x25CB; $s.Icon.ForeColor = $gray }
-        "wait" { $s.Icon.Text = [string][char]0x25CF; $s.Icon.ForeColor = [Drawing.Color]::DarkOrange }
-        "done" { $s.Icon.Text = [string][char]0x2714; $s.Icon.ForeColor = [Drawing.Color]::ForestGreen }
-        "skip" { $s.Icon.Text = [string][char]0x2013; $s.Icon.ForeColor = $gray }
-        "fail" { $s.Icon.Text = [string][char]0x2716; $s.Icon.ForeColor = [Drawing.Color]::Firebrick }
-    }
-}
-
-function Set-Game([string]$dir) {
-    $App.Game = $dir
-    $App.Version = if ($dir) { Get-GameVersion $dir } else { $null }
-    $sky = Step "skyrim"
-    if ($dir) { Set-Detail $sky "$dir  (version $($App.Version))" } else { Set-Detail $sky "Pas trouvé automatiquement : clique « Changer... »." }
-    foreach ($s in $steps) { if ($s.State -ne "skip") { Set-State $s "todo" } }
-}
-
-$timer = New-Object Windows.Forms.Timer
-$timer.Interval = 1000
-$timer.add_Tick({
-    if ($App.Busy) { return }
-    $App.Busy = $true
-    try {
-        $current = $steps | Where-Object { $_.State -eq "todo" -or $_.State -eq "wait" } | Select-Object -First 1
-        if (-not $current) {
-            $timer.Stop()
-            $App.Running = $false
-            $installButton.Enabled = $true
-            $installButton.Text = "Réinstaller"
-            $playButton.Enabled = $true
-            $status.Text = "Tout est prêt ! Lance le jeu avec « Jouer » ou le raccourci SkyCraft du Bureau."
-            [Windows.Forms.MessageBox]::Show(("SkyCraft est installé !`n`n" +
-                "Au premier lancement, une petite fenêtre Prism Launcher demande de te connecter avec ton compte Microsoft (celui qui a Minecraft). " +
-                "Fais Alt-Tab, connecte-toi, puis reviens dans Skyrim : Minecraft se télécharge (quelques minutes, une seule fois).`n`n" +
-                "Commence une nouvelle partie : Alternate Start te laisse choisir où tu démarres."), "SkyCraft", "OK", "Information") | Out-Null
-            return
-        }
-        $status.Text = "En cours : $($current.Title)"
-        # Le dernier objet : un appel oublié qui écrit dans le pipeline ne fausse pas le résultat.
-        $result = Invoke-Step $current | Select-Object -Last 1
-        Set-State $current $result
-        if ($result -eq "fail") {
-            $timer.Stop()
-            $App.Running = $false
-            $installButton.Enabled = $true
-            $installButton.Text = "Réessayer"
-            $status.Text = "Bloqué à « $($current.Title) » : voir le message à côté."
-        }
-    } catch {
-        $timer.Stop()
-        $App.Running = $false
-        $installButton.Enabled = $true
-        $installButton.Text = "Réessayer"
-        if ($current) { Set-State $current "fail"; Set-Detail $current $_.Exception.Message }
-        $status.Text = "Erreur : $($_.Exception.Message)"
-    } finally { $App.Busy = $false }
-})
-
-$installButton.add_Click({
-    foreach ($s in $steps) { if ($s.State -ne "skip") { Set-State $s "todo" } }
-    $installButton.Enabled = $false
-    $playButton.Enabled = $false
-    $App.Running = $true
-    $timer.Start()
-})
-
-$tutorialButton.add_Click({
+# En-tête : titre, étape, tuto. Pied : bouton secondaire à gauche, bouton principal à droite.
+$header = New-Box $form 0 0 720 78 $dark
+New-Label $header 24 12 400 32 "SkyCraft" (New-Object Drawing.Font("Segoe UI", 17, [Drawing.FontStyle]::Bold)) ([Drawing.Color]::White) | Out-Null
+$stepLabel = New-Label $header 26 46 420 22 "" $fontSmall ([Drawing.Color]::FromArgb(180, 186, 194))
+$tutoButton = New-Button $header 556 20 140 38 ([string][char]0x25B6 + "  Tuto vidéo") $false
+$tutoButton.add_Click({
     if ($TutorialUrl) { Start-Process $TutorialUrl }
-    else { [Windows.Forms.MessageBox]::Show("Le tuto arrive bientôt !", "SkyCraft", "OK", "Information") | Out-Null }
+    else { [Windows.Forms.MessageBox]::Show("Le tuto vidéo arrive bientôt !", "SkyCraft", "OK", "Information") | Out-Null }
 })
 
-$playButton.add_Click({
-    Start-Process (Join-Path $App.Game "skse64_loader.exe") -WorkingDirectory $App.Game
-    $form.Close()
-})
+$footer = New-Box $form 0 480 720 80 $light
+$primary = New-Button $footer 476 18 220 44 "" $true
+$secondary = New-Button $footer 24 18 160 44 "" $false
+$primary.add_Click({ if ($App.OnPrimary) { & $App.OnPrimary } })
+$secondary.add_Click({ if ($App.OnSecondary) { & $App.OnSecondary } })
 
-(Step "skyrim").ButtonControl.add_Click({
+$pages = @{}
+foreach ($n in 1..4) { $pages[$n] = New-Box $form 0 78 720 402 ([Drawing.Color]::White); $pages[$n].Visible = $false }
+$pageNames = @{ 1 = "Bienvenue"; 2 = "Les mods"; 3 = "Ton compte Minecraft"; 4 = "C'est prêt" }
+
+function Set-Footer([string]$primaryText, [scriptblock]$onPrimary, [string]$secondaryText, [scriptblock]$onSecondary) {
+    $primary.Text = $primaryText; $primary.Visible = [bool]$primaryText; $primary.Enabled = $true
+    $App.OnPrimary = $onPrimary
+    $secondary.Text = $secondaryText; $secondary.Visible = [bool]$secondaryText
+    $App.OnSecondary = $onSecondary
+}
+
+# --- Écran 1 : Bienvenue ----------------------------------------------------------------------
+
+$p1 = $pages[1]
+New-Label $p1 32 22 660 32 "Salut ! On installe SkyCraft." $fontTitle | Out-Null
+New-Label $p1 32 60 660 24 "Environ 5 minutes. Tu n'as que 3 choses à faire, je t'explique chaque clic :" $fontText $gray | Out-Null
+$lines = @("Télécharger 3 petits mods sur Nexus Mods", "Te connecter à ton compte Minecraft", "Jouer !")
+for ($i = 0; $i -lt $lines.Count; $i++) {
+    $y = 98 + 40 * $i
+    $badge = New-Label $p1 34 $y 30 30 ([string]($i + 1)) $fontBold ([Drawing.Color]::White)
+    $badge.BackColor = $green; $badge.TextAlign = "MiddleCenter"
+    New-Label $p1 76 ($y + 3) 600 26 $lines[$i] $fontBig | Out-Null
+}
+$needBox = New-Box $p1 32 228 656 100 $light
+New-Label $needBox 16 10 620 22 "Il te faut :" $fontBold | Out-Null
+New-Label $needBox 16 34 620 20 ([string][char]0x2022 + "  Skyrim Special Edition sur Steam, à jour, lancé au moins une fois") $fontSmall | Out-Null
+New-Label $needBox 16 54 620 20 ([string][char]0x2022 + "  Minecraft: Java Edition sur ton compte Microsoft") $fontSmall | Out-Null
+New-Label $needBox 16 74 165 20 ([string][char]0x2022 + "  un compte Nexus Mods") $fontSmall | Out-Null
+New-Link $needBox 180 73 200 "(gratuit, créer ici)" { Start-Process "https://users.nexusmods.com/register" } | Out-Null
+
+$skyIcon = New-Label $p1 32 344 30 30 "" $fontSymbol
+$skyText = New-Label $p1 64 348 520 44 "" $fontText
+$skyLink = New-Link $p1 590 348 110 "Changer..." {
     $dialog = New-Object Windows.Forms.FolderBrowserDialog
     $dialog.Description = "Le dossier de Skyrim Special Edition (celui qui contient SkyrimSE.exe)"
     if ($dialog.ShowDialog() -ne "OK") { return }
     if (-not (Test-Path (Join-Path $dialog.SelectedPath "SkyrimSE.exe"))) { Show-Error "Pas de SkyrimSE.exe dans ce dossier."; return }
     Set-Game $dialog.SelectedPath.TrimEnd('\')
-})
+}
 
-# Les boutons retrouvent leur étape par Tag (pas de GetNewClosure : il ne voit pas les fonctions du script).
-foreach ($s in $steps | Where-Object { $_.Nexus }) {
-    $s.ButtonControl.Tag = $s.Key
-    $s.ButtonControl.add_Click({
-        param($sender)
-        $step = Step $sender.Tag
-        $dialog = New-Object Windows.Forms.OpenFileDialog
-        $dialog.Filter = "Archives (*.7z;*.zip)|*.7z;*.zip"
-        $dialog.InitialDirectory = Get-DownloadsDir
-        if ($dialog.ShowDialog() -ne "OK") { return }
-        $step.Picked = $dialog.FileName
-        $step.Skipped = $false
-        $step.Bad = @($step.Bad | Where-Object { $_ -ne $dialog.FileName })
-        if (-not $App.Running) { Set-State $step "todo"; Set-Detail $step "Fichier choisi : clique « Installer »." }
-    })
-    if ($s.SkipControl) {
-        $s.SkipControl.Tag = $s.Key
-        $s.SkipControl.add_Click({
-            param($sender)
-            $step = Step $sender.Tag
-            $step.Skipped = $true
-            Set-State $step "skip"
-            Set-Detail $step "Passé. Sans lui, commence depuis une sauvegarde faite après Helgen."
-        })
+function Set-Game([string]$dir) {
+    $App.Game = $dir
+    $App.Version = if ($dir) { Get-GameVersion $dir } else { $null }
+    $ok = $false
+    if (-not $dir) {
+        $skyText.Text = "Je ne trouve pas Skyrim Special Edition. Clique « Changer... » et choisis son dossier."
+    } elseif ($App.Version -lt [version]"1.6.0") {
+        $skyText.Text = "Ton Skyrim ($($App.Version)) est trop ancien : mets-le à jour sur Steam."
+    } else {
+        $skyText.Text = "Skyrim trouvé (version $($App.Version))`n$dir"
+        $ok = $true
+    }
+    $skyIcon.Text = if ($ok) { $check } else { $cross }
+    $skyIcon.ForeColor = if ($ok) { $green } else { $red }
+    $skyLink.Text = if ($dir) { "Changer..." } else { "Choisir..." }
+    if ($App.Page -eq 1) { $primary.Enabled = $ok }
+}
+
+# --- Écran 2 : les mods -----------------------------------------------------------------------
+
+$p2 = $pages[2]
+New-Label $p2 32 22 660 32 "Étape 1 : télécharge 3 mods" $fontTitle | Out-Null
+New-Label $p2 32 60 660 40 ("Pour chaque mod, j'ouvre sa page Nexus dans ton navigateur (connecte-toi la première fois). " +
+    "Dès que le fichier arrive dans Téléchargements, je l'installe et je passe au suivant.") $fontText $gray | Out-Null
+$howBox = New-Box $p2 32 110 656 160 ([Drawing.Color]::FromArgb(255, 248, 225))
+$howTitle = New-Label $howBox 16 12 620 24 "" $fontBold
+$howSteps = New-Label $howBox 16 40 620 80 "" $fontText
+$howError = New-Label $howBox 16 118 400 36 "" $fontSmall $red
+New-Link $howBox 430 128 110 "Rouvrir la page" { if ($App.Mod) { Open-NexusPage $App.Mod } } | Out-Null
+New-Link $howBox 530 128 120 "J'ai déjà le fichier..." {
+    if (-not $App.Mod) { return }
+    $dialog = New-Object Windows.Forms.OpenFileDialog
+    $dialog.Filter = "Archives (*.7z;*.zip)|*.7z;*.zip"
+    $dialog.InitialDirectory = Get-DownloadsDir
+    if ($dialog.ShowDialog() -eq "OK") {
+        $App.Mod.Picked = $dialog.FileName
+        $App.Mod.Bad = @($App.Mod.Bad | Where-Object { $_ -ne $dialog.FileName })
+    }
+} | Out-Null
+$y = 286
+foreach ($m in $mods) {
+    $m.Icon = New-Label $p2 32 $y 30 30 $circle $fontSymbol $gray
+    New-Label $p2 64 ($y + 4) 170 24 $m.Name $fontBold | Out-Null
+    $m.Status = New-Label $p2 236 ($y + 5) 360 24 "" $fontSmall $gray
+    if ($m.Optional) {
+        $m.SkipLink = New-Link $p2 600 ($y + 5) 100 "Passer" {
+            $alt = Get-Mod "altstart"
+            if ($alt.State -eq "done") { return }
+            $alt.State = "skip"
+            Update-Mod $alt "Passé : commence alors depuis une sauvegarde faite après Helgen."
+        }
+    }
+    $y += 36
+}
+
+function Update-Mod($m, [string]$status) {
+    switch ($m.State) {
+        "todo" { $m.Icon.Text = $circle; $m.Icon.ForeColor = $gray }
+        "wait" { $m.Icon.Text = $dot; $m.Icon.ForeColor = [Drawing.Color]::DarkOrange }
+        "done" { $m.Icon.Text = $check; $m.Icon.ForeColor = $green }
+        "skip" { $m.Icon.Text = [string][char]0x2013; $m.Icon.ForeColor = $gray }
+    }
+    $m.Status.Text = $status
+}
+
+function Show-ModHelp($m) {
+    $howTitle.Text = "$($m.Name) : sur la page qui vient de s'ouvrir"
+    $howSteps.Text = ("1.  Onglet « Files »`n" +
+        "2.  Sous $($m.File), clique « Manual download »`n" +
+        "3.  Clique « Slow download » (gratuit) et attends quelques secondes`n" +
+        "C'est tout, je m'occupe du reste.")
+    $howError.Text = ""
+}
+
+function Step-Mods {
+    foreach ($m in $mods) {
+        if ($m.State -eq "done" -or $m.State -eq "skip") { continue }
+        if (& $m.Installed) { $m.State = "done"; Update-Mod $m "Installé"; continue }
+        if ($App.Mod -ne $m) {
+            $App.Mod = $m
+            $m.State = "wait"
+            Update-Mod $m "En attente du téléchargement..."
+            Show-ModHelp $m
+            if (-not $m.Opened) { Open-NexusPage $m }
+        }
+        $file = $m.Picked
+        if (-not $file) { $found = Find-NexusDownload $m.Nexus $m.Bad; if ($found) { $file = $found.FullName } }
+        if (-not $file) { return }
+        Update-Mod $m "Installation..."
+        [Windows.Forms.Application]::DoEvents()
+        try {
+            & $m.Install $file
+            $m.State = "done"
+            Update-Mod $m "Installé"
+        } catch {
+            $m.Bad += $file
+            $m.Picked = $null
+            Update-Mod $m "En attente du bon fichier..."
+            $howError.Text = "Oups, $([IO.Path]::GetFileName($file)) : $($_.Exception.Message)"
+            return
+        }
+    }
+    $App.Mod = $null
+    Show-Page 3
+}
+
+# --- Écran 3 : compte Minecraft ---------------------------------------------------------------
+
+$p3 = $pages[3]
+New-Label $p3 32 22 660 32 "Étape 2 : ton compte Minecraft" $fontTitle | Out-Null
+$prepIcon = New-Label $p3 32 64 30 30 $dot $fontSymbol ([Drawing.Color]::DarkOrange)
+$prepText = New-Label $p3 64 68 620 24 "Installation de SkyCraft..." $fontText
+$progress = New-Object Windows.Forms.ProgressBar
+$progress.SetBounds(64, 96, 400, 10)
+$progress.Visible = $false
+$p3.Controls.Add($progress)
+$signBox = New-Box $p3 32 120 656 200 ([Drawing.Color]::FromArgb(255, 248, 225))
+New-Label $signBox 16 12 620 24 "Une fenêtre « Prism Launcher » va s'ouvrir. Dedans :" $fontBold | Out-Null
+New-Label $signBox 16 42 620 120 ("1.  En haut à droite, clique « Accounts », puis « Manage Accounts... »`n" +
+    "2.  Clique « Add Microsoft »`n" +
+    "3.  Suis le lien et entre le code affiché, avec le compte Microsoft qui a Minecraft`n" +
+    "4.  C'est tout : je vois quand c'est bon et je ferme Prism moi-même.") $fontText | Out-Null
+New-Label $signBox 16 160 620 36 "Tu ne fais ça qu'une fois. Minecraft, lui, se télécharge tout seul au premier lancement du jeu." $fontSmall $gray | Out-Null
+$signBox.Visible = $false
+$signIcon = New-Label $p3 32 334 30 30 "" $fontSymbol
+$signText = New-Label $p3 64 338 620 40 "" $fontText
+
+function Open-Prism {
+    if ($App.Prism -and -not $App.Prism.HasExited) { return }
+    $App.Prism = Start-Process "$mcDir\Prism\prismlauncher.exe" -WorkingDirectory "$mcDir\Prism" -PassThru
+}
+
+function Set-Prep([string]$state, [string]$text) {
+    $prepText.Text = $text
+    switch ($state) {
+        "wait" { $prepIcon.Text = $dot; $prepIcon.ForeColor = [Drawing.Color]::DarkOrange }
+        "done" { $prepIcon.Text = $check; $prepIcon.ForeColor = $green }
+        "fail" { $prepIcon.Text = $cross; $prepIcon.ForeColor = $red }
+    }
+    [Windows.Forms.Application]::DoEvents()
+}
+
+# install (SkyCraft, éventuellement téléchargé) > unpack (son Minecraft) > signin (Prism) > page 4
+function Step-Minecraft {
+    switch ($App.Mc) {
+        "install" {
+            $zip = $null
+            if ($App.Download) {
+                $task = $App.Download.Task
+                if (-not $task.IsCompleted) {
+                    if (Test-Path $App.Download.Path) { $progress.Value = [Math]::Min(100, [int](100 * (Get-Item $App.Download.Path).Length / $App.Download.Size)) }
+                    return
+                }
+                $progress.Visible = $false
+                $path = $App.Download.Path
+                $App.Download = $null
+                if ($task.IsFaulted) { throw "le téléchargement de SkyCraft a échoué ($($task.Exception.InnerException.Message))." }
+                $zip = $path
+            } else {
+                $local = Find-LocalSkyCraftZip
+                if ($local) { $zip = $local.FullName }
+                else {
+                    try { $release = Invoke-RestMethod "https://api.github.com/repos/$GitHubRepo/releases/latest" -UseBasicParsing }
+                    catch { throw "SkyCraft-<version>.zip n'est pas à côté de l'installateur. As-tu bien extrait tout le zip ?" }
+                    $asset = $release.assets | Where-Object { $_.name -match '^SkyCraft-[\d.]+\.zip$' } | Select-Object -First 1
+                    if (-not $asset) { throw "pas de SkyCraft-<version>.zip dans la dernière release GitHub." }
+                    $path = Join-Path $work $asset.name
+                    Remove-Item $path -ErrorAction SilentlyContinue
+                    $App.Download = @{ Task = (New-Object Net.WebClient).DownloadFileTaskAsync($asset.browser_download_url, $path); Path = $path; Size = [double]$asset.size }
+                    $progress.Value = 0
+                    $progress.Visible = $true
+                    Set-Prep "wait" "Téléchargement de SkyCraft..."
+                    return
+                }
+            }
+            Set-Prep "wait" "Installation de SkyCraft..."
+            Install-SkyCraft $zip
+            Set-Prep "wait" "Préparation de Minecraft..."
+            $App.Unpack = Start-Unpack
+            $App.Mc = "unpack"
+        }
+        "unpack" {
+            if ($App.Unpack) {
+                if (-not $App.Unpack.HasExited) { return }
+                if ($App.Unpack.ExitCode) { throw "le Minecraft de SkyCraft n'a pas pu être dépaqueté (tar $($App.Unpack.ExitCode))." }
+                Complete-Unpack
+                $App.Unpack = $null
+            }
+            Set-Prep "done" "SkyCraft est installé."
+            if (Test-MinecraftAccount) { Show-Page 4; return }
+            $signBox.Visible = $true
+            $signIcon.Text = $dot; $signIcon.ForeColor = [Drawing.Color]::DarkOrange
+            $signText.Text = "En attente de ta connexion dans Prism..."
+            Set-Footer "Rouvrir Prism" { Open-Prism } "Plus tard" { Show-Page 4 }
+            Open-Prism
+            $App.Mc = "signin"
+        }
+        "signin" {
+            if (-not (Test-MinecraftAccount)) { return }
+            $signIcon.Text = $check; $signIcon.ForeColor = $green
+            $signText.Text = "Compte Minecraft connecté !"
+            if ($App.Prism -and -not $App.Prism.HasExited) { [void]$App.Prism.CloseMainWindow() }
+            $App.Mc = "done"
+            Show-Page 4
+        }
     }
 }
 
+# --- Écran 4 : prêt ---------------------------------------------------------------------------
+
+$p4 = $pages[4]
+New-Label $p4 32 22 660 32 "C'est prêt !" $fontTitle | Out-Null
+$readyText = New-Label $p4 32 62 660 70 "" $fontText
+$tipsBox = New-Box $p4 32 140 656 240 $light
+New-Label $tipsBox 16 12 620 24 "Bon à savoir" $fontBold | Out-Null
+New-Label $tipsBox 16 40 624 190 ([string][char]0x2022 + "  Lance toujours le jeu avec le raccourci « SkyCraft » du Bureau (pas depuis Steam).`n" +
+    [string][char]0x2022 + "  Au premier lancement, Minecraft se télécharge en arrière-plan (quelques minutes) : les messages en haut à gauche de Skyrim te disent quand c'est prêt.`n" +
+    [string][char]0x2022 + "  Nouvelle partie : avec Alternate Start, prie la statue de Mara pour choisir où tu commences.`n" +
+    [string][char]0x2022 + "  Touches : G parler / ouvrir (Skyrim), E inventaire, O menu Minecraft, Échap menu Skyrim, T chat.") $fontText | Out-Null
+
+function Enter-Ready {
+    New-Shortcut
+    $readyText.Text = if (Test-MinecraftAccount) {
+        "Tout est installé et ton compte Minecraft est connecté. Raccourci « SkyCraft » ajouté sur le Bureau."
+    } else {
+        "Tout est installé. Raccourci « SkyCraft » ajouté sur le Bureau. Au premier lancement, une fenêtre Prism te demandera de te connecter à ton compte Microsoft (Alt-Tab)."
+    }
+}
+
+# --- Navigation -------------------------------------------------------------------------------
+
+function Show-Page([int]$n) {
+    $App.Page = $n
+    foreach ($k in $pages.Keys) { $pages[$k].Visible = ($k -eq $n) }
+    $stepLabel.Text = "Étape $n sur 4  " + [string][char]0x2022 + "  " + $pageNames[$n]
+    switch ($n) {
+        1 {
+            Set-Footer "Commencer" {
+                if (-not (Test-Writable $App.Game)) {
+                    if (Test-Admin) { Show-Error "Impossible d'écrire dans $($App.Game)."; return }
+                    $answer = [Windows.Forms.MessageBox]::Show("Skyrim est dans un dossier protégé : je dois redémarrer en administrateur (Windows va te demander l'autorisation).", "SkyCraft", "OKCancel", "Information")
+                    if ($answer -eq "OK") { Restart-Elevated $App.Game 2 }
+                    return
+                }
+                Show-Page 2
+            } "" $null
+            Set-Game $App.Game
+        }
+        2 { Set-Footer "" $null "" $null }
+        3 { Set-Footer "" $null "" $null }
+        4 {
+            Enter-Ready
+            Set-Footer "Jouer" {
+                Start-Process (Join-Path $App.Game "skse64_loader.exe") -WorkingDirectory $App.Game
+                $form.Close()
+            } "Fermer" { $form.Close() }
+        }
+    }
+}
+
+$timer = New-Object Windows.Forms.Timer
+$timer.Interval = 800
+$timer.add_Tick({
+    if ($App.Busy) { return }
+    $App.Busy = $true
+    try {
+        if ($App.Page -eq 2) { Step-Mods }
+        elseif ($App.Page -eq 3 -and $App.Mc -ne "failed") { Step-Minecraft }
+    } catch {
+        if ($App.Page -eq 3) {
+            $App.Mc = "failed"
+            Set-Prep "fail" ("Problème : " + $_.Exception.Message)
+            Set-Footer "Réessayer" { $App.Mc = "install"; Set-Footer "" $null "" $null } "" $null
+        } else {
+            $howError.Text = "Problème : " + $_.Exception.Message
+        }
+    } finally { $App.Busy = $false }
+})
+
 try {
-    if ($Game) { Set-Game $Game } else { Set-Game (Find-Skyrim) }
-    # Relancé en administrateur : on reprend directement.
-    if ($Game) { $installButton.PerformClick() }
+    if (-not $Game) { $Game = Find-Skyrim }
+    Set-Game $Game
+    Show-Page $(if ($Game -and $Page -gt 1) { $Page } else { 1 })
+    $timer.Start()
     [void]$form.ShowDialog()
 } catch {
     Show-Error "L'installateur a planté : $($_.Exception.Message)"

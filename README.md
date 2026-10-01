@@ -86,11 +86,12 @@ Minecraft's own files, and a GPU that runs Minecraft 26.3.
    closes.
 
 **Without a mod manager:** extract `SkyCraft-Installer-<version>.zip` and double-click
-`Installer SkyCraft.bat`. A window finds Skyrim (Steam), opens the Nexus pages of SKSE64, Address
-Library and Alternate Start, picks up each file from your Downloads folder once you've clicked
-**Manual download** (a free Nexus account is needed), installs everything into Skyrim's `Data`
-folder and puts a **SkyCraft** shortcut on the desktop. Always start the game with that shortcut.
-The tutorial button's link is `$TutorialUrl` at the top of `installer\SkyCraft-Installer.ps1`.
+`Installer SkyCraft.bat`. A 4-screen assistant (in French) finds Skyrim (Steam), opens the Nexus
+pages of SKSE64, Address Library and Alternate Start one at a time, saying exactly what to click
+(**Manual download**, a free Nexus account is needed), installs each file as soon as it lands in
+Downloads, installs SkyCraft, opens Prism for the Microsoft sign-in (and notices when it's done),
+and puts a **SkyCraft** shortcut on the desktop. Always start the game with that shortcut.
+The **Tuto vidéo** button's link is `$TutorialUrl` at the top of `installer\SkyCraft-Installer.ps1`.
 
 Updating: install the new SkyCraft zip over the old one. The next start updates the Minecraft side
 too and keeps your sign-in and your world.
